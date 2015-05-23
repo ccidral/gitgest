@@ -6,6 +6,8 @@ It scans one or more directories for git repositories, builds a list with the mo
 
 Tested on Ubuntu 14.10 and OSX Mavericks.
 
+![Sample digest email message](https://raw.githubusercontent.com/ccidral/gitgest/master/images/gitgest.png)
+
 ## Dependencies
 
  * Bash
