@@ -43,6 +43,12 @@ recipient:         another@address.com
 ```
 In the example above, `gitgest` should recursively scan `/path/to/repositories` and `/another/repositories/location` for git repositories (ie. directory names that end with `.git`).
 
+Now you can call `gitgest` from a cron job:
+
+```cron
+0 8 * * * /usr/local/bin/gitgest   # will run every day at 8AM
+```
+
 ## License
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
 
