@@ -78,8 +78,8 @@
                 <xsl:variable name="messageLength" select="string-length(message)"/>
                 <xsl:variable name="messageMaxLength" select="200"/>
                 <xsl:choose>
-                    <xsl:when test="$messageLength > $messageMaxLength"><xsl:value-of
-                            select="substring(message,0,$messageMaxLength)"/>...
+                    <xsl:when test="$messageLength > $messageMaxLength">
+                        <xsl:value-of select="substring(message,0,$messageMaxLength)"/>...
                     </xsl:when>
                     <xsl:otherwise>
                         <xsl:value-of select="message"/>
