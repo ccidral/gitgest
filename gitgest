@@ -1,0 +1,294 @@
+#!/bin/bash
+
+########################################################################
+# This is gitgest, a tool that emails git commit digests in html format.
+# Created by Célio Cidral Jr <https://github.com/ccidral>
+########################################################################
+
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# Usage: You'll probably want to call this script from cron.
+#        Specify the -v option if you want gitgest to print
+#        debug messages.
+
+
+# TODO: Try to replace saxon in the future with something non-java. We can't
+#       use xsltproc because the XSLT email template uses some XSLT 2.0-specific
+#       functions, and sadly xsltproc sits on XSLT 1.0.
+
+
+VERSION="1.0"
+GIT="/usr/bin/git"
+SAXON="/usr/bin/saxon"
+
+[ "$1" = "-v" ] && DEBUG=true
+
+
+#~~~  Define paths to some necessary files  ~~~#
+
+CONFIG_DIR="/etc/gitgest"
+CONFIG_FILE="$CONFIG_DIR/gitgest.conf"
+HTML_TEMPLATE_FILE="$CONFIG_DIR/template.xslt"
+
+
+#~~~  Functions  ~~~#
+
+debug() {
+  [ "$DEBUG" = true ] && echo "$1"
+}
+
+assertProgramExists() {
+  PROGRAM_CMD="$1"
+  command -v $PROGRAM_CMD >/dev/null 2>&1 || { echo "$PROGRAM_CMD is required but was not found. Aborting." >&2; exit 1; }
+}
+
+assertNonEmptyFile() {
+  FILE_PATH="$1"
+  
+  debug "assert non empty file: $FILE_PATH"
+  
+  if [ ! -e "$FILE_PATH" ]; then
+    echo "error: file not found: $FILE_PATH"
+    exit 1
+  fi
+
+  if [ ! -f "$FILE_PATH" ]; then
+    echo "error: not a regular file: $FILE_PATH"
+    exit 1
+  fi
+
+  if [ ! -s "$FILE_PATH" ]; then
+    echo "error: file is empty: $FILE_PATH"
+    exit 1
+  fi
+}
+
+assertDirectory() {
+  DIR_PATH="$1"
+  
+  debug "assert directory: $DIR_PATH"
+  
+  if [ ! -e "$DIR_PATH" ]; then
+    echo "error: directory not found: $DIR_PATH"
+    exit 1
+  fi
+
+  if [ ! -d "$DIR_PATH" ]; then
+    echo "error: not a directory: $DIR_PATH"
+    exit 1
+  fi
+}
+
+assertNotEmpty() {
+  VAR="$1"
+  ERR_MSG="$2"
+  
+  if [ -z "$VAR" ]; then
+    echo "$ERR_MSG"
+    exit 1
+  fi
+}
+
+get_config_values() {
+  CONFIG_KEY="$1"
+  
+  # 1) read valid config lines
+  # 2) read lines containing $CONFIG_KEY
+  # 3) extract the values
+  # 4) trim leading spaces
+  # 5) trim trailing spaces
+  
+  egrep "^\s*[^:]+:\s*" "$CONFIG_FILE"  \
+    | egrep "^\s*$CONFIG_KEY:\s*"       \
+    | sed "s/^\s*$CONFIG_KEY:\s*//g"    \
+    | sed 's/^ *//g'                    \
+    | sed 's/ *$//g'
+}
+
+get_config_value() {
+  CONFIG_KEY="$1"
+  get_config_values "$CONFIG_KEY" | head -n 1
+}
+
+delete_file() {
+  FILE_PATH="$1"
+  debug "delete file $FILE_PATH"
+  rm "$1"
+}
+
+
+#~~~  Make sure things are what they should be  ~~~#
+
+assertProgramExists "$GIT"
+assertProgramExists "$SAXON"
+assertNonEmptyFile "$CONFIG_FILE"
+
+
+#~~~  Configuration settings  ~~~#
+
+SENDER_ADDRESS="`get_config_value "sender_address"`"
+EMAIL_SUBJECT="`get_config_value "email_subject"`"
+
+assertNotEmpty "$SENDER_ADDRESS" "error: sender_address setting is empty or not set in $CONFIG_FILE"
+assertNotEmpty "$EMAIL_SUBJECT" "error: email_subject setting is empty or not set in $CONFIG_FILE"
+
+
+#~~~  Decide how to call mktemp  ~~~#
+
+PLATFORM="`uname | awk '{print tolower($0)}'`"
+MKTEMP="mktemp"
+
+if [ "$PLATFORM" = "darwin" ]; then
+  MKTEMP="$MKTEMP -t gitgest"
+else
+  MKTEMP="$MKTEMP --suffix gitgest"
+fi
+
+
+#~~~  Generate the report in XML format  ~~~#
+
+debug "running gitgest v$VERSION"
+
+
+REPORT_BODY_XML_FILE="`$MKTEMP`"
+debug "write temporary xml data to $REPORT_BODY_XML_FILE"
+
+# For each repository root path
+for REPOSITORIES_ROOT in $(get_config_values "repositories"); do
+  assertDirectory "$REPOSITORIES_ROOT"
+  
+  # Scan git repositories in this root path
+  for REPOSITORY_PATH in $(find "$REPOSITORIES_ROOT" -type d -name "*.git"); do
+    REPOSITORY_NAME="${REPOSITORY_PATH:${#REPOSITORIES_ROOT} + 1}"
+    
+    # Remove the '.git' from the end of the repository name
+    REPOSITORY_NAME=${REPOSITORY_NAME:0:${#REPOSITORY_NAME} - 4}
+    
+    HEADS_DIR="$REPOSITORY_PATH/refs/heads"
+    
+    if [ ! -d $HEADS_DIR ]; then
+      debug "$REPOSITORY_NAME: refs/heads not a directory in $REPOSITORY_PATH. Probably not a git repository; skipping"
+    else
+      REPOSITORY_XML=""
+      
+      # For each branch in this repository
+      for REF_PATH in $(find "$HEADS_DIR" -type f); do
+        BRANCH_NAME="${REF_PATH:${#HEADS_DIR} + 1}"
+        PREVIOUS_COMMIT="`$GIT -C "$REPOSITORY_PATH" config gitgest.lastcommit.$BRANCH_NAME`"
+        LAST_COMMIT="`$GIT -C "$REPOSITORY_PATH" log $BRANCH_NAME -1 "--pretty=format:%H"`"
+        
+        debug "$REPOSITORY_NAME: commit log interval is $PREVIOUS_COMMIT..$LAST_COMMIT for branch '$BRANCH_NAME'"
+        
+        # If something has been committed since the last time we checked...
+        if [ "$PREVIOUS_COMMIT" != "$LAST_COMMIT" ]; then
+          
+          # Is it a new branch?...
+          if [ -z "$PREVIOUS_COMMIT" ]; then
+            # ...should get at most the last 10 commits from history.
+            # This limit prevents recipients to receive a huge email
+            # when the new branch has tons of commits.
+            COMMIT_INTERVAL="-10"
+            
+          else
+            # It's an existing branch. Should get commits made since
+            # the last recorded commit
+            COMMIT_INTERVAL="$PREVIOUS_COMMIT..$LAST_COMMIT"
+          fi
+          
+          # Get the list of commits
+          BRANCH_XML="`$GIT -C "$REPOSITORY_PATH" log $BRANCH_NAME "--pretty=format:<commit><hash>%H</hash><abbrevhash>%h</abbrevhash><date>%ci</date><author>%ae</author><refdesc>%d</refdesc><message>%s</message></commit>" $COMMIT_INTERVAL`"
+          
+          if [ -z "$PREVIOUS_COMMIT" ]; then
+            debug "$REPOSITORY_PATH has a new branch named $BRANCH_NAME"
+          else
+            COMMIT_COUNT="`echo "$BRANCH_XML" | wc -l | sed 's/ //g'`"
+            debug "$REPOSITORY_NAME: $COMMIT_COUNT commit(s) found in '$BRANCH_NAME' from $PREVIOUS_COMMIT to $LAST_COMMIT"
+          fi
+          
+          REPOSITORY_XML="$REPOSITORY_XML<branch name='$BRANCH_NAME'>$BRANCH_XML</branch>"
+          
+          LAST_COMMIT="`$GIT -C "$REPOSITORY_PATH" log $BRANCH_NAME -1 "--pretty=format:%H"`"
+          $GIT -C "$REPOSITORY_PATH" config gitgest.lastcommit.$BRANCH_NAME "$LAST_COMMIT"
+        fi
+      done # For each branch in this repository
+      
+      # Write the xml content to file
+      if [ ! -z "$REPOSITORY_XML" ]; then
+        echo "<repository name='$REPOSITORY_NAME'>$REPOSITORY_XML</repository>" >> $REPORT_BODY_XML_FILE
+      fi
+      
+    fi # If refs/heads is an existing directory
+  done # For each repository path
+done   # For each repository root
+
+
+#~~~  Exit if there is nothing to report  ~~~#
+
+if [ ! -s "$REPORT_BODY_XML_FILE" ]; then
+  debug "nothing to report"
+  delete_file "$REPORT_BODY_XML_FILE"
+  exit 0
+fi
+
+
+#~~~  Finish building the XML content and write it to a file  ~~~#
+
+REPORT_XML_FILE="`$MKTEMP`"
+debug "write final xml data to $REPORT_XML_FILE"
+
+echo "<report timestamp='`date +%FT%T%z`'>"     > $REPORT_XML_FILE
+cat  $REPORT_BODY_XML_FILE                     >> $REPORT_XML_FILE
+echo "</report>"                               >> $REPORT_XML_FILE
+
+
+#~~~  Finally write the report in HTML format  ~~~#
+
+REPORT_HTML_FILE="`$MKTEMP`"
+debug "write final html report to $REPORT_HTML_FILE"
+
+$SAXON "-xsl:$HTML_TEMPLATE_FILE" "-s:$REPORT_XML_FILE" "-o:$REPORT_HTML_FILE"
+
+if [ "$DEBUG" = true ]; then
+  REPORT_COPY_PATH="/tmp/last-gitgest-report.html"
+  debug "copy report html file to $REPORT_COPY_PATH"
+  cp "$REPORT_HTML_FILE" "$REPORT_COPY_PATH"
+fi
+
+
+#~~~  Send the report to email addresses specified in the configuration file  ~~~#
+
+for RECIPIENT_ADDRESS in $(get_config_values "recipient"); do
+  if [ ! -z "$RECIPIENT_ADDRESS" ]; then
+    debug "send report to $RECIPIENT_ADDRESS"
+    (
+      echo "From: ${SENDER_ADDRESS}";
+      echo "To: ${RECIPIENT_ADDRESS}";
+      echo "Subject: ${EMAIL_SUBJECT}";
+      echo "Content-Type: text/html";
+      echo "MIME-Version: 1.0";
+      echo "";
+      cat "$REPORT_HTML_FILE";
+    ) | sendmail -t
+  fi
+done
+
+
+#~~~  Clean up  ~~~#
+
+delete_file "$REPORT_BODY_XML_FILE"
+delete_file "$REPORT_XML_FILE"
+delete_file "$REPORT_HTML_FILE"
+
+exit 0
